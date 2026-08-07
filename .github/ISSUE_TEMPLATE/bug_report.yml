@@ -63,7 +63,7 @@ body:
     attributes:
       label: Version requirement/版本要求
       options:
-        - label: I am using the latest debug build from [GitHub Actions](https://github.com/JingMatrix/NeoZygisk/actions)./我正在使用 [GitHub Actions](https://github.com/JingMatrix/NeoZygisk/actions) 中最新的调试版本。
+        - label: I am using the latest debug build from [GitHub Actions](https://github.com/eduardo3677-ai/NeoZygisk/actions)./我正在使用 [GitHub Actions](https://github.com/eduardo3677-ai/NeoZygisk/actions) 中最新的调试版本。
           required: true
   - type: textarea
     attributes:
