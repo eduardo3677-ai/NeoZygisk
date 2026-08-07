@@ -245,21 +245,34 @@ bool injectModuleDex(JNIEnv *env, int dir_fd, const char *dir_label) {
     }
 
     // If fewer dex mapped than opened, trim the array to what actually mapped.
+    // The elements were placed contiguously at [0, mapped) by the loop above, so
+    // only the first `mapped` slots are usable.
     if (mapped < dex_count) {
         jobjectArray trimmed = env->NewObjectArray(mapped, byte_buffer_cls, nullptr);
-        if (trimmed != nullptr) {
-            for (int i = 0; i < mapped; ++i) {
-                jobject e = env->GetObjectArrayElement(buffers, i);
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                    break;
-                }
-                env->SetObjectArrayElement(trimmed, i, e);
-                env->DeleteLocalRef(e);
-            }
+        if (trimmed == nullptr) {
+            // OOM while trimming: passing the untrimmed array would hand the
+            // class loader a ByteBuffer[] with null holes, which crashes with an
+            // NPE. Bail out cleanly instead of leaking a broken loader.
+            env->ExceptionClear();
+            LOGE("[%s] failed to allocate trimmed ByteBuffer[]", dir_label);
             env->DeleteLocalRef(buffers);
-            buffers = trimmed;
+            env->DeleteLocalRef(byte_buffer_cls);
+            env->DeleteLocalRef(in_mem_cls);
+            env->DeleteLocalRef(parent_cl);
+            env->DeleteLocalRef(class_loader_cls);
+            return false;
         }
+        for (int i = 0; i < mapped; ++i) {
+            jobject e = env->GetObjectArrayElement(buffers, i);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                break;
+            }
+            env->SetObjectArrayElement(trimmed, i, e);
+            env->DeleteLocalRef(e);
+        }
+        env->DeleteLocalRef(buffers);
+        buffers = trimmed;
     }
 
     // Create the InMemoryDexClassLoader rooted at the boot classloader. Keep a

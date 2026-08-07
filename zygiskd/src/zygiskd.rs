@@ -409,7 +409,15 @@ fn handle_read_modules(stream: &mut UnixStream, context: &AppContext) -> Result<
 
 fn handle_request_companion_socket(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
     let index = stream.read_usize()?;
-    let module = &context.modules[index];
+    let module = match context.modules.get(index) {
+        Some(m) => m,
+        None => {
+            warn!("Companion: requested invalid module index {index} ({} loaded).", context.modules.len());
+            // Inform the client that no companion is available.
+            stream.write_u8(0)?;
+            return Ok(());
+        }
+    };
     let mut companion = module.companion.lock().unwrap();
 
     // Check if the existing companion socket is still alive.
@@ -462,7 +470,20 @@ fn handle_request_companion_socket(stream: &mut UnixStream, context: &AppContext
 
 fn handle_get_module_dir(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
     let index = stream.read_usize()?;
-    let module = &context.modules[index];
+    let module = match context.modules.get(index) {
+        Some(m) => m,
+        None => {
+            warn!(
+                "GetModuleDir: requested invalid module index {index} ({} loaded).",
+                context.modules.len()
+            );
+            // Send /dev/null so the client's recv_fd() gets a valid-but-useless fd
+            // (an error sentinel) instead of blocking forever on an empty stream.
+            let null_fd = std::fs::File::open("/dev/null")?;
+            stream.send_fd(null_fd.as_raw_fd())?;
+            return Ok(());
+        }
+    };
     let dir_path = format!("{}/{}", constants::PATH_MODULES_DIR, module.name);
     let dir = fs::File::open(dir_path)?;
     stream.send_fd(dir.as_raw_fd())?;
