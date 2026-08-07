@@ -12,6 +12,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    outputs:
+      # Expose the generated release/debug zip names so the `release` job can
+      # locate and attach them when a GitHub Release is created.
+      release_name: ${{ steps.prepare_artifacts.outputs.RELEASE_NAME }}
+      debug_name: ${{ steps.prepare_artifacts.outputs.DEBUG_NAME }}
+
     steps:
       # ====================================================================
       # 1. SETUP ENVIRONMENT
@@ -103,3 +109,63 @@ jobs:
         with:
           name: debug-symbols
           path: zygiskd/build/symbols/debug/
+
+  # ====================================================================
+  # RELEASE: Builds a GitHub Release automatically on every push to
+  # `master`. A unique tag is derived from the built zip name (which
+  # embeds verName, verCode and the commit hash), so each push produces
+  # its own immutable release.
+  # ====================================================================
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    # Only create a release on real pushes to the default branch.
+    # PRs / merge_group / workflow_dispatch still build & verify above
+    # but do not publish a release.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    permissions:
+      contents: write # Allow creating Git tags and GitHub Releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.release_name }}
+          path: release-artifact/
+
+      - name: Determine Release Tag & Version
+        id: version
+        run: |
+          # RELEASE_NAME looks like "NeoZygisk-v<verName>-<verCode>-<commitHash>"
+          RELEASE_NAME="${{ needs.build.outputs.release_name }}"
+          # Derive a unique, immutable tag: strip the "NeoZygisk-" prefix.
+          TAG="${RELEASE_NAME#NeoZygisk-}"
+          if [ -z "$TAG" ] || [ "$TAG" = "$RELEASE_NAME" ]; then
+            echo "::error::unexpected release artifact name: $RELEASE_NAME"
+            exit 1
+          fi
+          echo "tag=${TAG}"          >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "Detected tag: $TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.release_name }}
+          body: |
+            Auto-generated release from commit `${{ github.sha }}`.
+
+            This release was built automatically on push to `master`.
+            See the changelog (`module/changelog.md`) for details.
+          files: |
+            release-artifact/**
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
