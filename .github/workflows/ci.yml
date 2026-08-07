@@ -82,6 +82,7 @@ jobs:
 
           echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_OUTPUT
           echo "DEBUG_NAME=${DEBUG_NAME}" >> $GITHUB_OUTPUT
+          echo "RELEASE_ZIP=${RELEASE_ZIP}" >> $GITHUB_OUTPUT
 
           unzip "$RELEASE_ZIP" -d "release-artifact"
           unzip "$DEBUG_ZIP" -d "debug-artifact"
@@ -110,11 +111,26 @@ jobs:
           name: debug-symbols
           path: zygiskd/build/symbols/debug/
 
+      # Keep the raw, compressed release zip so the `release` job can attach it
+      # to a GitHub Release (the unpacked `release-artifact/` is only for diffing).
+      - name: Upload Release Zip (compressed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-zip
+          path: ${{ steps.prepare_artifacts.outputs.RELEASE_ZIP }}
+          if-no-files-found: error
+
   # ====================================================================
   # RELEASE: Builds a GitHub Release automatically on every push to
   # `master`. A unique tag is derived from the built zip name (which
-  # embeds verName, verCode and the commit hash), so each push produces
-  # its own immutable release.
+  # embeds the semantic version, the commit count and the commit hash),
+  # so each push produces its own immutable release. Release notes are
+  # generated automatically from the commits since the previous release,
+  # and the update manifest (`module/zygisk.json`) is refreshed and
+  # pushed back to `master` so manager apps pick up the new version.
+  #
+  # The metadata push is made with the default GITHUB_TOKEN, which does
+  # NOT re-trigger this `push` workflow, so there is no release loop.
   # ====================================================================
   release:
     runs-on: ubuntu-latest
@@ -125,34 +141,72 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
     permissions:
-      contents: write # Allow creating Git tags and GitHub Releases
+      contents: write # Allow creating Git tags/Releases AND pushing json
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # Full history so we can diff commits since the last release tag.
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download Release Artifact
+      - name: Download Release Zip (compressed)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build.outputs.release_name }}
-          path: release-artifact/
+          name: release-zip
+          path: release-zip/
 
-      - name: Determine Release Tag & Version
+      - name: Determine Release Metadata
         id: version
         run: |
-          # RELEASE_NAME looks like "NeoZygisk-v<verName>-<verCode>-<commitHash>"
+          # RELEASE_NAME looks like "NeoZygisk-v<verName>-<commitHash>-release"
+          # with verName = "v<ver>.<commitCount>", e.g. NeoZygisk-v2.3.277-abc1234-release
           RELEASE_NAME="${{ needs.build.outputs.release_name }}"
-          # Derive a unique, immutable tag: strip the "NeoZygisk-" prefix.
-          TAG="${RELEASE_NAME#NeoZygisk-}"
-          if [ -z "$TAG" ] || [ "$TAG" = "$RELEASE_NAME" ]; then
+
+          BASE="${RELEASE_NAME#NeoZygisk-}"   # v2.3.277-abc1234-release
+          BASE="${BASE%-release}"             # v2.3.277-abc1234
+          TAG="${BASE}"                       # unique per push
+
+          VERSION="${BASE%-*}"                # v2.3.277
+          VERSION_CODE="${VERSION##*.}"       # 277
+          COMMIT_HASH="${BASE##*-}"           # abc1234
+          ZIP_NAME="${RELEASE_NAME}.zip"
+
+          if [ -z "$TAG" ] || [ "$BASE" = "$RELEASE_NAME" ]; then
             echo "::error::unexpected release artifact name: $RELEASE_NAME"
             exit 1
           fi
-          echo "tag=${TAG}"          >> "$GITHUB_OUTPUT"
-          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "Detected tag: $TAG"
+
+          echo "tag=${TAG}"                    >> "$GITHUB_OUTPUT"
+          echo "release_name=${RELEASE_NAME}"  >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"            >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}"  >> "$GITHUB_OUTPUT"
+          echo "commit_hash=${COMMIT_HASH}"    >> "$GITHUB_OUTPUT"
+          echo "zip_name=${ZIP_NAME}"          >> "$GITHUB_OUTPUT"
+          echo "Detected: tag=$TAG version=$VERSION code=$VERSION_CODE sha=$COMMIT_HASH"
+
+      - name: Generate changelog from commits
+        id: changelog
+        run: |
+          # Find the most recent previously published release tag (if any).
+          gh auth status  2>/dev/null || true
+          LAST_TAG="$(gh release list --limit 2 --json tagName --jq '.[1].tagName // empty' || true)"
+          if [ -n "$LAST_TAG" ]; then
+            echo "Generating notes since previous release tag: $LAST_TAG"
+            NOTES="$(git log "$LAST_TAG"..HEAD --no-merges --pretty=format:'- %s')"
+          else
+            echo "No previous release found; using recent commits"
+            NOTES="$(git log -20 --no-merges --pretty=format:'- %s')"
+          fi
+
+          NOTES="${NOTES:-No changes recorded.}"
+          # Store change summaries for use in the release body.
+          {
+            echo "notes<<EOF"
+            printf '%s\n' "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -160,12 +214,48 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.release_name }}
           body: |
-            Auto-generated release from commit `${{ github.sha }}`.
+            ## ${{ steps.version.outputs.release_name }}
 
-            This release was built automatically on push to `master`.
-            See the changelog (`module/changelog.md`) for details.
+            **Auto-generated release** from commit `${{ steps.version.outputs.commit_hash }}`
+            on push to `master`.
+
+            ### Changes
+            ${{ steps.changelog.outputs.notes }}
+
+            ---
+            Changelog (full): `module/changelog.md`
           files: |
-            release-artifact/**
+            release-zip/**
           fail_on_unmatched_files: false
           draft: false
           prerelease: false
+
+      - name: Update update manifest (zygisk.json)
+        run: |
+          REPO="${{ github.repository }}"   # eduardo3677-ai/NeoZygisk
+          TAG="${{ steps.version.outputs.tag }}"
+          ZIP_NAME="${{ steps.version.outputs.zip_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_CODE="${{ steps.version.outputs.version_code }}"
+          ZIP_URL="https://github.com/${REPO}/releases/download/${TAG}/${ZIP_NAME}"
+          CHANGELOG_URL="https://raw.githubusercontent.com/${REPO}/master/module/changelog.md"
+
+          cat > module/zygisk.json <<EOF
+          {
+            "version": "${VERSION}",
+            "versionCode": ${VERSION_CODE},
+            "zipUrl": "${ZIP_URL}",
+            "changelog": "${CHANGELOG_URL}"
+          }
+          EOF
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add module/zygisk.json
+          if git diff --cached --quiet; then
+            echo "zygisk.json unchanged; nothing to commit."
+          else
+            git commit -m "chore(module): update update manifest to ${VERSION} (${VERSION_CODE})"
+            git push origin master
+            echo "Pushed updated zygisk.json (${VERSION}, code ${VERSION_CODE})."
+          fi

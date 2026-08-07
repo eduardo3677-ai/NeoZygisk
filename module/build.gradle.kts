@@ -48,7 +48,7 @@ androidComponents.onVariants { variant ->
     val moduleDir = layout.buildDirectory.dir("outputs/module/$variantLowered")
     val zipFileName = "$moduleName-$verName-$verCode-$commitHash-$buildTypeLowered.zip".replace(' ', '-')
 
-    val prepareModuleFilesTask = task<Sync>("prepareModuleFiles$variantCapped") {
+    val prepareModuleFilesTask = tasks.register<Sync>("prepareModuleFiles$variantCapped") {
         group = "module"
         dependsOn(
             ":loader:assemble$variantCapped",
@@ -104,7 +104,7 @@ androidComponents.onVariants { variant ->
         }
     }
 
-    val zipTask = task<Zip>("zip$variantCapped") {
+    val zipTask = tasks.register<Zip>("zip$variantCapped") {
         group = "module"
         dependsOn(prepareModuleFilesTask)
         archiveFileName.set(zipFileName)
@@ -112,10 +112,12 @@ androidComponents.onVariants { variant ->
         from(moduleDir)
     }
 
-    val pushTask = task<Exec>("push$variantCapped") {
+    val pushTask = tasks.register<Exec>("push$variantCapped") {
         group = "module"
         dependsOn(zipTask)
-        commandLine("adb", "push", zipTask.outputs.files.singleFile.path, "/data/local/tmp")
+        doFirst {
+            commandLine("adb", "push", zipTask.get().outputs.files.singleFile.path, "/data/local/tmp")
+        }
     }
 
     val installAPatchTask = task("installAPatch$variantCapped") {

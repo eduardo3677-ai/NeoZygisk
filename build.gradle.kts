@@ -15,7 +15,10 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 val moduleId by extra("zygisksu")
 val moduleName by extra("NeoZygisk")
-val verName by extra("v2.3")
+// verName embeds the commit count so every release (and every CI build) reflects
+// both the semantic version and the exact commit number automatically, without
+// any manual bumping.
+val verName by extra("v2.3.$gitCommitCount")
 val verCode by extra(gitCommitCount)
 val commitHash by extra(gitCommitHash)
 val minAPatchVersion by extra(10762)
