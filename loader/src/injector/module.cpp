@@ -12,6 +12,7 @@
 #include <lsplt.hpp>
 
 #include "daemon.hpp"
+#include "dex.hpp"
 #include "dl.hpp"
 #include "files.hpp"
 #include "logging.hpp"
@@ -285,16 +286,49 @@ void ZygiskContext::fork_post() {
     sigmask(SIG_UNBLOCK, SIGCHLD);
 }
 
+// Attempts host-side dex injection for a module that has no native Zygisk entry
+// point (i.e. a dex-only / "old API" Java module). `index` is the module index
+// reported by zygiskd, used to resolve its module directory.
+static void dex_load_fallback(JNIEnv *env, size_t index, const std::string &name) {
+    int dir_fd = zygiskd::GetModuleDir(index);
+    if (dir_fd < 0) {
+        LOGW("dex fallback for `%s`: failed to open module dir", name.c_str());
+        return;
+    }
+    dex::injectModuleDex(env, dir_fd, name.c_str());
+    close(dir_fd);
+}
+
 /* Zygisksu changed: Load module fds */
 void ZygiskContext::run_modules_pre() {
     auto ms = zygiskd::ReadModules();
     auto size = ms.size();
     for (size_t i = 0; i < size; i++) {
         auto &m = ms[i];
-        if (void *handle = DlopenMem(m.memfd, RTLD_NOW);
-            void *entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
-            modules.emplace_back(i, handle, entry);
+
+        // Load the module shared object from the sealed memfd provided by zygiskd.
+        // Any 3rd party module code is untrusted: a broken module must never take
+        // down the process, so each failure path is handled explicitly and logged.
+        void *handle = DlopenMem(m.memfd, RTLD_NOW);
+        if (handle == nullptr) {
+            LOGE("failed to dlopen module `%s`", m.name.c_str());
+            continue;
         }
+
+        // Canonical Zygisk modules (API v1..v5, including the historical
+        // `zygisk_module_entry`-based contract) export this symbol.
+        void *entry = dlsym(handle, "zygisk_module_entry");
+        if (entry == nullptr) {
+            // No native Zygisk entry: this may be a dex-only ("old API") module that
+            // ships `classes*.dex` and expects the host to inject them.
+            // Avoid leaking the handle we just opened (the module is not usable as a
+            // native module), then attempt host-side dex injection as a fallback.
+            dlclose(handle);
+            dex_load_fallback(env, i, m.name);
+            continue;
+        }
+
+        modules.emplace_back(i, handle, entry);
     }
 
     for (auto &m : modules) {
@@ -443,7 +477,7 @@ bool abort_zygote_unmount(const std::vector<mount_info> &traces, uint32_t info_f
         if (trace.target.rfind("/product", 0) == 0) {
             if (trace.target.rfind("/product/bin", 0) == 0) continue;
             if (!is_magisk && trace.target != "/product") continue;
-            // workaround for zygote resource overlay (JingMatrix/NeoZygisk#26)
+            // workaround for zygote resource overlay (eduardo3677-ai/NeoZygisk#26)
             LOGV("abort unmounting zygote due to prohibited target: [%s]", trace.raw_info.c_str());
             return true;
         }
