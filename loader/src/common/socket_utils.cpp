@@ -128,10 +128,17 @@ bool write_usize(int fd, size_t val) { return write_exact<size_t>(fd, val); }
 
 std::string read_string(int fd) {
     auto len = read_usize(fd);
-    char* buf = new char[len + 1];
-    buf[len] = '\0';
-    xread(fd, buf, len);
-    return buf;
+    // Defensive cap: the only strings transported over the control socket are
+    // module names and short paths. A bogus/huge length (a desynced or malicious
+    // peer) must never trigger an unbounded allocation or a bad_alloc crash.
+    constexpr size_t kMaxReadString = 4096;
+    if (len == 0 || len > kMaxReadString) return {};
+
+    std::string s(len, '\0');
+    // Validate the full read. xread() may return short on EOF/desync; without
+    // this check the tail of `s` would be uninitialized memory (UB + garbage).
+    if (xread(fd, s.data(), len) != static_cast<ssize_t>(len)) return {};
+    return s;
 }
 
 bool write_u8(int fd, uint8_t val) { return write_exact<uint8_t>(fd, val); }

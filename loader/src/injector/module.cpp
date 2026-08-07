@@ -85,7 +85,17 @@ bool ZygiskModule::valid() const {
 }
 
 /* Zygisksu changed: Use own zygiskd */
-int ZygiskModule::connectCompanion() const { return zygiskd::ConnectCompanion(id); }
+int ZygiskModule::connectCompanion() const {
+    int fd = zygiskd::ConnectCompanion(id);
+    // Auto-exempt the freshly-opened companion fd. It is created during a
+    // module's preAppSpecialize, i.e. AFTER fork_pre() snapshotted allowed_fds,
+    // so without this sanitize_fds() would close it and sever the module's
+    // companion connection. Mirrors upstream Zygisk behavior.
+    if (fd >= 0 && g_ctx != nullptr) {
+        g_ctx->exempt_fd(fd);
+    }
+    return fd;
+}
 
 /* Zygisksu changed: Use own zygiskd */
 int ZygiskModule::getModuleDir() const { return zygiskd::GetModuleDir(id); }
