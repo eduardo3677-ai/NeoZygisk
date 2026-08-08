@@ -185,14 +185,22 @@ jobs:
           BASE="${RELEASE_NAME#NeoZygisk-}"   # v2.3.296-296-906ea7d-release
           BASE="${BASE%-release}"             # v2.3.296-296-906ea7d
 
-          # Unique immutable tag per push (also used as the release asset name).
-          TAG="${BASE}"
-
           # Last `-` token is the commit hash; the remainder is "verName-verCode".
           COMMIT_HASH="${BASE##*-}"                   # 906ea7d
           WITHOUT_HASH="${BASE%-${COMMIT_HASH}}"      # v2.3.296-296
           VERSION_CODE="${WITHOUT_HASH##*-}"          # 296 (integer)
           VERSION="${WITHOUT_HASH%-${VERSION_CODE}}"  # v2.3.296
+
+          # Release tag / assets: use "verName-commitHash" (a single version) so
+          # the tag does NOT carry the duplicated integer verCode. Example tag:
+          #   v2.3.296-906ea7d
+          # The committed module zip keeps its full filename (which still embeds
+          # both verName and verCode); only the release TAG and visible TITLE drop
+          # the duplicated number.
+          TAG="${VERSION}-${COMMIT_HASH}"             # v2.3.296-906ea7d
+          RELEASE_TITLE="${RELEASE_NAME}"             # keep full name for title too
+          # Drop the duplicated verCode from the visible release title:
+          RELEASE_TITLE="${RELEASE_NAME/NeoZygisk-${WITHOUT_HASH}-/NeoZygisk-${VERSION}-}"
 
           ZIP_NAME="${RELEASE_NAME}.zip"
           SH_NAME="${RELEASE_NAME}.sh"
@@ -204,12 +212,13 @@ jobs:
 
           echo "tag=${TAG}"                    >> "$GITHUB_OUTPUT"
           echo "release_name=${RELEASE_NAME}"  >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}"            >> "$GITHUB_OUTPUT"
           echo "version_code=${VERSION_CODE}"  >> "$GITHUB_OUTPUT"
           echo "commit_hash=${COMMIT_HASH}"    >> "$GITHUB_OUTPUT"
           echo "zip_name=${ZIP_NAME}"          >> "$GITHUB_OUTPUT"
           echo "sh_name=${SH_NAME}"            >> "$GITHUB_OUTPUT"
-          echo "Detected: tag=$TAG version=$VERSION code=$VERSION_CODE sha=$COMMIT_HASH"
+          echo "Detected: tag=$TAG title=$RELEASE_TITLE version=$VERSION code=$VERSION_CODE sha=$COMMIT_HASH"
 
       - name: Generate changelog from commits
         id: changelog
@@ -237,9 +246,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.release_name }}
+          name: ${{ steps.version.outputs.release_title }}
           body: |
-            ## ${{ steps.version.outputs.release_name }}
+            ## ${{ steps.version.outputs.release_title }}
 
             **Auto-generated release** from commit `${{ steps.version.outputs.commit_hash }}`
             on push to `master`.
