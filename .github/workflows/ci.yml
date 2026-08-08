@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      # Expose the generated release/debug zip names so the `release` job can
-      # locate and attach them when a GitHub Release is created.
+      # Expose the generated release zip name so the `release` job can locate
+      # and attach it (and the self-extracting `.sh`) when a GitHub Release is
+      # created.
       release_name: ${{ steps.prepare_artifacts.outputs.RELEASE_NAME }}
-      debug_name: ${{ steps.prepare_artifacts.outputs.DEBUG_NAME }}
 
     steps:
       # ====================================================================
@@ -75,17 +75,20 @@ jobs:
         id: prepare_artifacts
         run: |
           RELEASE_ZIP=$(find module/build/outputs/release -type f -name 'NeoZygisk-v*-release.zip')
-          DEBUG_ZIP=$(find module/build/outputs/release -type f -name 'NeoZygisk-v*-debug.zip')
 
           RELEASE_NAME=$(basename "$RELEASE_ZIP" .zip)
-          DEBUG_NAME=$(basename "$DEBUG_ZIP" .zip)
 
           echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_OUTPUT
-          echo "DEBUG_NAME=${DEBUG_NAME}" >> $GITHUB_OUTPUT
           echo "RELEASE_ZIP=${RELEASE_ZIP}" >> $GITHUB_OUTPUT
 
           unzip "$RELEASE_ZIP" -d "release-artifact"
-          unzip "$DEBUG_ZIP" -d "debug-artifact"
+
+          # Build a self-extracting `.sh` installer from the release zip. This is
+          # what gets attached to the (draft) release instead of the debug zip.
+          RELEASE_SH="${RELEASE_NAME}.sh"
+          bash .github/scripts/build-selfextract.sh "$RELEASE_ZIP" "$RELEASE_SH"
+          echo "RELEASE_SH=${RELEASE_SH}" >> $GITHUB_OUTPUT
+          echo "Built self-extracting module: ${RELEASE_SH}"
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
@@ -93,11 +96,14 @@ jobs:
           name: ${{ steps.prepare_artifacts.outputs.RELEASE_NAME }}
           path: release-artifact/
 
-      - name: Upload Debug Artifact
+      # Self-extracting `.sh` module, uploaded so the `release` job can attach it
+      # to the (draft) release alongside the raw zip.
+      - name: Upload Self-Extracting Module (.sh)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.prepare_artifacts.outputs.DEBUG_NAME }}
-          path: debug-artifact/
+          name: release-sh
+          path: ${{ steps.prepare_artifacts.outputs.RELEASE_SH }}
+          if-no-files-found: error
 
       - name: Upload Release Symbols
         uses: actions/upload-artifact@v4
@@ -157,23 +163,41 @@ jobs:
           name: release-zip
           path: release-zip/
 
+      - name: Download Self-Extracting Module (.sh)
+        uses: actions/download-artifact@v4
+        with:
+          name: release-sh
+          path: release-sh/
+
       - name: Determine Release Metadata
         id: version
         run: |
-          # RELEASE_NAME looks like "NeoZygisk-v<verName>-<commitHash>-release"
-          # with verName = "v<ver>.<commitCount>", e.g. NeoZygisk-v2.3.277-abc1234-release
+          # RELEASE_NAME looks like "NeoZygisk-<verName>-<verCode>-<commitHash>-release"
+          # e.g. NeoZygisk-v2.3.296-296-906ea7d-release
+          #
+          # Both the semantic verName (v2.3.296) AND the integer verCode (296)
+          # are embedded in the name. We must split them apart so the update
+          # manifest gets a valid integer versionCode — a naive `##*.` split of
+          # the whole tail produced "296-296", which is invalid JSON and broke
+          # APatch update detection.
           RELEASE_NAME="${{ needs.build.outputs.release_name }}"
 
-          BASE="${RELEASE_NAME#NeoZygisk-}"   # v2.3.277-abc1234-release
-          BASE="${BASE%-release}"             # v2.3.277-abc1234
-          TAG="${BASE}"                       # unique per push
+          BASE="${RELEASE_NAME#NeoZygisk-}"   # v2.3.296-296-906ea7d-release
+          BASE="${BASE%-release}"             # v2.3.296-296-906ea7d
 
-          VERSION="${BASE%-*}"                # v2.3.277
-          VERSION_CODE="${VERSION##*.}"       # 277
-          COMMIT_HASH="${BASE##*-}"           # abc1234
+          # Unique immutable tag per push (also used as the release asset name).
+          TAG="${BASE}"
+
+          # Last `-` token is the commit hash; the remainder is "verName-verCode".
+          COMMIT_HASH="${BASE##*-}"                   # 906ea7d
+          WITHOUT_HASH="${BASE%-${COMMIT_HASH}}"      # v2.3.296-296
+          VERSION_CODE="${WITHOUT_HASH##*-}"          # 296 (integer)
+          VERSION="${WITHOUT_HASH%-${VERSION_CODE}}"  # v2.3.296
+
           ZIP_NAME="${RELEASE_NAME}.zip"
+          SH_NAME="${RELEASE_NAME}.sh"
 
-          if [ -z "$TAG" ] || [ "$BASE" = "$RELEASE_NAME" ]; then
+          if [ -z "$TAG" ] || [ "$BASE" = "$RELEASE_NAME" ] || [ -z "$VERSION_CODE" ]; then
             echo "::error::unexpected release artifact name: $RELEASE_NAME"
             exit 1
           fi
@@ -184,6 +208,7 @@ jobs:
           echo "version_code=${VERSION_CODE}"  >> "$GITHUB_OUTPUT"
           echo "commit_hash=${COMMIT_HASH}"    >> "$GITHUB_OUTPUT"
           echo "zip_name=${ZIP_NAME}"          >> "$GITHUB_OUTPUT"
+          echo "sh_name=${SH_NAME}"            >> "$GITHUB_OUTPUT"
           echo "Detected: tag=$TAG version=$VERSION code=$VERSION_CODE sha=$COMMIT_HASH"
 
       - name: Generate changelog from commits
@@ -224,14 +249,24 @@ jobs:
 
             ---
             Changelog (full): `module/changelog.md`
+
+            > This release is created as a **draft**. Publish it from the releases
+            > page when you want it to be live. Note: APatch/KSU/Magisk auto-updates
+            > via the update manifest only download the module **after** this draft
+            > is published (draft release assets are not downloadable).
           files: |
             release-zip/**
+            release-sh/**
           fail_on_unmatched_files: false
-          draft: false
+          draft: true
           prerelease: false
 
       - name: Update update manifest (zygisk.json)
         run: |
+          # NOTE: `zipUrl` points at the release asset under the (draft) tag. Because
+          # releases are drafts, APatch/KSU/Magisk can only download the module once
+          # the draft is published from the releases page — this keeps each version
+          # immutable and safe, at the cost of updates not appearing until publish.
           REPO="${{ github.repository }}"   # eduardo3677-ai/NeoZygisk
           TAG="${{ steps.version.outputs.tag }}"
           ZIP_NAME="${{ steps.version.outputs.zip_name }}"
