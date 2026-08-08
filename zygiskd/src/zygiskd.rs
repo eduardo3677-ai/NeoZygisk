@@ -305,9 +305,18 @@ fn create_daemon_socket() -> Result<UnixListener> {
 fn spawn_companion(name: &str, lib_fd: RawFd) -> Result<Option<UnixStream>> {
     let (mut daemon_sock, companion_sock) = UnixStream::pair()?;
 
-    // FIXME: A more robust way to get the current executable path is desirable.
-    let self_exe = std::env::args().next().unwrap();
-    let nice_name = self_exe.split('/').last().unwrap_or("zygiskd");
+    // Resolve the real executable path via /proc/self/exe. This is robust even
+    // when argv[0] is relative, empty, or manipulated (e.g. launched by execvp
+    // with a custom name), because /proc/self/exe always reflects the actual
+    // running binary. Falls back to argv[0] if the symlink is unavailable.
+    let self_exe = match std::fs::read_link("/proc/self/exe") {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            error!("read_link /proc/self/exe failed ({e}), falling back to argv[0]");
+            std::env::args().next().unwrap_or_default()
+        }
+    };
+    let nice_name = self_exe.rsplit('/').next().unwrap_or("zygiskd");
 
     // Prepare ALL child-side state BEFORE fork(). After fork() in a multithreaded
     // daemon, the child must only touch async-signal-safe functions: doing any
