@@ -4,3 +4,10 @@
 build
 local.properties
 Cargo.lock
+
+# Build artifacts
+target
+*.zip
+
+# Diagnostic logs
+*.log

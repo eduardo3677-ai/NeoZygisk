@@ -98,3 +98,45 @@ allow su appdomain dir {search read open}
 allow su appdomain file {open read getattr}
 allow magisk appdomain dir {search read open}
 allow magisk appdomain file {open read getattr}
+
+# ============================================================================
+# 7. WRITE LOGS / FILES UNDER /data/adb (workdir + manager dirs)
+#    The daemon (su/magisk) writes its logs and runtime state under
+#    /data/adb/neozygisk (the `--workdir`, see zygiskd's GetTmpPath()) and the
+#    ptracer writes /data/adb/neozygisk/module.prop (monitor_impl.cpp).
+#    post-fs-data.sh labels the workdir as system_file; /data/adb itself is
+#    labeled per root implementation (adb_data_file, apd_data_file for APatch,
+#    magisk_file for Magisk, ksu_file for KernelSU). Grant the daemon full
+#    read/write on all of these so logging and state files keep working no
+#    matter which manager is active.
+# ============================================================================
+# Workdir (system_file) — create/append log and state files.
+allow su system_file dir {search read open write create add_name remove_name setattr}
+allow su system_file file {open read getattr write create append setattr unlink rename}
+allow magisk system_file dir {search read open write create add_name remove_name setattr}
+allow magisk system_file file {open read getattr write create append setattr unlink rename}
+
+# /data/adb root + manager-specific types.
+allow su adb_data_file dir {search read open write create add_name remove_name setattr}
+allow su adb_data_file file {open read getattr write create append setattr unlink rename}
+allow magisk adb_data_file dir {search read open write create add_name remove_name setattr}
+allow magisk adb_data_file file {open read getattr write create append setattr unlink rename}
+
+allow su apd_data_file dir {search read open write create add_name remove_name setattr}
+allow su apd_data_file file {open read getattr write create append setattr unlink rename}
+allow magisk apd_data_file dir {search read open write create add_name remove_name setattr}
+allow magisk apd_data_file file {open read getattr write create append setattr unlink rename}
+
+allow su magisk_file dir {search read open write create add_name remove_name setattr}
+allow su magisk_file file {open read getattr write create append setattr unlink rename}
+allow magisk magisk_file dir {search read open write create add_name remove_name setattr}
+allow magisk magisk_file file {open read getattr write create append setattr unlink rename}
+
+allow su ksu_file dir {search read open write create add_name remove_name setattr}
+allow su ksu_file file {open read getattr write create append setattr unlink rename}
+allow magisk ksu_file dir {search read open write create add_name remove_name setattr}
+allow magisk ksu_file file {open read getattr write create append setattr unlink rename}
+
+# SELinux attribute plumbing for writing under /data/adb (sock/socket only).
+allow su tmpfs file *
+allow magisk tmpfs file *
