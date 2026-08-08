@@ -120,7 +120,7 @@ androidComponents.onVariants { variant ->
         }
     }
 
-    val installAPatchTask = task("installAPatch$variantCapped") {
+    val installAPatchTask = tasks.register("installAPatch$variantCapped") {
         group = "module"
         dependsOn(pushTask)
         doLast {
@@ -136,7 +136,7 @@ androidComponents.onVariants { variant ->
         }
     }
 
-    val installKsuTask = task("installKsu$variantCapped") {
+    val installKsuTask = tasks.register("installKsu$variantCapped") {
         group = "module"
         dependsOn(pushTask)
         doLast {
@@ -152,25 +152,25 @@ androidComponents.onVariants { variant ->
         }
     }
 
-    val installMagiskTask = task<Exec>("installMagisk$variantCapped") {
+    val installMagiskTask = tasks.register<Exec>("installMagisk$variantCapped") {
         group = "module"
         dependsOn(pushTask)
         commandLine("adb", "shell", "su", "-M", "-c", "magisk --install-module /data/local/tmp/$zipFileName")
     }
 
-    task<Exec>("installAPatchAndReboot$variantCapped") {
+    tasks.register<Exec>("installAPatchAndReboot$variantCapped") {
         group = "module"
         dependsOn(installAPatchTask)
         commandLine("adb", "reboot")
     }
 
-    task<Exec>("installKsuAndReboot$variantCapped") {
+    tasks.register<Exec>("installKsuAndReboot$variantCapped") {
         group = "module"
         dependsOn(installKsuTask)
         commandLine("adb", "reboot")
     }
 
-    task<Exec>("installMagiskAndReboot$variantCapped") {
+    tasks.register<Exec>("installMagiskAndReboot$variantCapped") {
         group = "module"
         dependsOn(installMagiskTask)
         commandLine("adb", "reboot")
