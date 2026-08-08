@@ -84,7 +84,7 @@ jobs:
           unzip "$RELEASE_ZIP" -d "release-artifact"
 
           # Build a self-extracting `.sh` installer from the release zip. This is
-          # what gets attached to the (draft) release instead of the debug zip.
+          # what gets attached to the release instead of the debug zip.
           RELEASE_SH="${RELEASE_NAME}.sh"
           bash .github/scripts/build-selfextract.sh "$RELEASE_ZIP" "$RELEASE_SH"
           echo "RELEASE_SH=${RELEASE_SH}" >> $GITHUB_OUTPUT
@@ -97,7 +97,7 @@ jobs:
           path: release-artifact/
 
       # Self-extracting `.sh` module, uploaded so the `release` job can attach it
-      # to the (draft) release alongside the raw zip.
+      # to the release alongside the raw zip.
       - name: Upload Self-Extracting Module (.sh)
         uses: actions/upload-artifact@v4
         with:
@@ -249,24 +249,18 @@ jobs:
 
             ---
             Changelog (full): `module/changelog.md`
-
-            > This release is created as a **draft**. Publish it from the releases
-            > page when you want it to be live. Note: APatch/KSU/Magisk auto-updates
-            > via the update manifest only download the module **after** this draft
-            > is published (draft release assets are not downloadable).
           files: |
             release-zip/**
             release-sh/**
           fail_on_unmatched_files: false
-          draft: true
+          draft: false
           prerelease: false
 
       - name: Update update manifest (zygisk.json)
         run: |
-          # NOTE: `zipUrl` points at the release asset under the (draft) tag. Because
-          # releases are drafts, APatch/KSU/Magisk can only download the module once
-          # the draft is published from the releases page — this keeps each version
-          # immutable and safe, at the cost of updates not appearing until publish.
+          # `zipUrl` points at the release asset under the version tag. The release
+          # is created as a normal (live) release, so the module is immediately
+          # downloadable and APatch/KSU/Magisk auto-updates work right away.
           REPO="${{ github.repository }}"   # eduardo3677-ai/NeoZygisk
           TAG="${{ steps.version.outputs.tag }}"
           ZIP_NAME="${{ steps.version.outputs.zip_name }}"
