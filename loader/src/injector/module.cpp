@@ -2,6 +2,7 @@
 
 #include <android/dlext.h>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -309,12 +310,68 @@ static void dex_load_fallback(JNIEnv *env, size_t index, const std::string &name
     close(dir_fd);
 }
 
+// ============================================================================
+// UNIVERSAL per-app module filtering.
+// Any module may publish a `packages/` directory inside its module directory;
+// each entry is a package name (e.g. com.example.app). If that directory exists
+// the module is only loaded into processes whose app matches one of the entries.
+// If it does not exist the module is loaded into every process (the classic
+// Zygisk behavior). This lets ANY module (LuckyPatcher "in-app", etc.) declare
+// which apps activate its code without any host-side hardcoding.
+// ============================================================================
+static bool module_applies_to_process(int dir_fd, const char *process) {
+    // Processes with no app name (e.g. server_specialize path) are not filtered
+    // by an app whitelist; modules with packages/ simply do not apply there.
+    if (process == nullptr || process[0] == '\0') return false;
+
+    int pkgs_fd = openat(dir_fd, "packages", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (pkgs_fd < 0) {
+        // No whitelist -> module applies to every process.
+        return true;
+    }
+
+    DIR *dir = fdopendir(pkgs_fd);
+    if (dir == nullptr) {
+        close(pkgs_fd);
+        return false;
+    }
+
+    bool found = false;
+    dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') continue;  // skip . and ..
+        if (strcmp(process, entry->d_name) == 0) {
+            found = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
 /* Zygisksu changed: Load module fds */
 void ZygiskContext::run_modules_pre() {
     auto ms = zygiskd::ReadModules();
     auto size = ms.size();
     for (size_t i = 0; i < size; i++) {
         auto &m = ms[i];
+
+        // UNIVERSAL filter: if this is an app process, skip modules that publish
+        // a packages/ whitelist which does not contain the current app. This
+        // prevents loading module dex/so into apps that do not enable the module
+        // (fixes sluggishness + crashes with per-app modules).
+        if (flags & APP_SPECIALIZE) {
+            int dir_fd = zygiskd::GetModuleDir(i);
+            if (dir_fd >= 0) {
+                bool applies = module_applies_to_process(dir_fd, process);
+                close(dir_fd);
+                if (!applies) {
+                    LOGV("module `%s` skipped: app `%s` not in packages/ whitelist",
+                         m.name.c_str(), process);
+                    continue;
+                }
+            }
+        }
 
         // Load the module shared object from the sealed memfd provided by zygiskd.
         // Any 3rd party module code is untrusted: a broken module must never take
