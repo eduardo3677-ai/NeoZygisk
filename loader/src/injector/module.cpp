@@ -99,7 +99,19 @@ int ZygiskModule::connectCompanion() const {
 }
 
 /* Zygisksu changed: Use own zygiskd */
-int ZygiskModule::getModuleDir() const { return zygiskd::GetModuleDir(id); }
+int ZygiskModule::getModuleDir() const {
+    int fd = zygiskd::GetModuleDir(id);
+    // Auto-exempt the freshly-opened module-directory fd, just like
+    // connectCompanion(). It is created during a module's preAppSpecialize,
+    // i.e. AFTER fork_pre() snapshotted allowed_fds, so without this
+    // sanitize_fds() would close it. ZygoteLoader-style modules keep this fd
+    // and read their own module.prop through /proc/self/fd/<fd> past
+    // specialization, so closing it would break them.
+    if (fd >= 0 && g_ctx != nullptr) {
+        g_ctx->exempt_fd(fd);
+    }
+    return fd;
+}
 
 void ZygiskModule::setOption(zygisk::Option opt) {
     if (g_ctx == nullptr) return;
