@@ -1,17 +1,100 @@
+# NeoZygisk SELinux policy
+#
+# Applied by Magisk/KernelSU/APatch via `magiskpolicy` at module install or on
+# every boot. Each line is a `allow <source> <target> <class> <perms>` rule.
+# NOTE: `<target>` here is the *object's* type (the fourth field of an SELinux
+# avc permission, i.e. the type of the file / process / socket being accessed).
+#
+# ============================================================================
+# 1. BASE / MODULE FILES
+#    The module ships a Zygisk-style control socket + files used by Zygote.
+# ============================================================================
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
 allow zygote zygisk_file sock_file {read write}
 
+# ============================================================================
+# 2. ZYGOTE / SYSTEM_SERVER ACCESS TO ROOT-ADJACENT TYPES
+#    Keep the pre-existing rules so normal module loading keeps working.
+# ============================================================================
 allow zygote magisk lnk_file read
 allow zygote unlabeled file {read open}
 allow zygote zygote capability sys_chroot
 allow zygote su dir search
 allow zygote su {lnk_file file} read
-
 allow zygote adb_data_file dir search
-allow zygote zygote process execmem
-allow system_server system_server process execmem
 allow zygote tmpfs file *
 allow zygote appdomain_tmpfs file *
 allow zygote proc file *
 allow zygote nsfs file *
+
+# ============================================================================
+# 3. DEX INJECTION
+#    NeoZygisk loads `classes*.dex` from modules into the running Zygote /
+#    system_server via InMemoryDexClassLoader (loader/src/injector/dex.cpp).
+#    ART needs executable anonymous memory plus the ability to execute mapped
+#    (potentially file-backed) dex and JIT regions, and to read module dex
+#    files. These rules give Zygote and system_server the memory/exec bits.
+# ============================================================================
+allow zygote zygote process execmem
+allow zygote zygote process execmod
+allow zygote zygote process fork
+allow system_server system_server process execmem
+allow system_server system_server process execmod
+allow system_server system_server process fork
+
+# Read + mmap module dex files from the module dir (typed system_file / zygisk_file).
+allow zygote zygisk_file file {open read getattr mmap execute}
+allow zygote system_file file {open read getattr mmap execute}
+allow zygote app_data_file dir {search read open}
+allow zygote app_data_file file {open read getattr mmap execute}
+
+# ============================================================================
+# 4. PTrace INTO OTHER UIDs / OTHER APPS
+#    The ptracer (loader/src/ptracer/*) attaches to Zygote, system_server and
+#    freshly forked app processes to set up module loading before the app
+#    specializes. The daemon runs under the `su` / `magisk` domain (launched
+#    from post-fs-data.sh). We must allow ptrace + signal + proc inspection
+#    across those domains so the tracer can inject into any app's UID.
+# ============================================================================
+allow su zygote process {ptrace sigchld }
+allow su system_server process {ptrace sigchld }
+allow su appdomain process ptrace
+allow su untrusted_app process ptrace
+allow su platform_app process ptrace
+allow su system_app process ptrace
+allow magisk zygote process ptrace
+allow magisk system_server process ptrace
+allow magisk appdomain process ptrace
+
+# Read /proc/<pid>/... of other processes while tracing them.
+allow su proc file {open read getattr}
+allow su proc dir {search read getattr}
+allow su proc_ns file {open read getattr}
+allow su zygote dir {search read open}
+allow su zygote file {open read getattr}
+allow magisk proc file {open read getattr}
+allow magisk proc dir {search read getattr}
+
+# ============================================================================
+# 5. ENTER OTHER APPS' MOUNT NAMESPACES (setns)
+#    zygiskd opens /proc/<pid>/ns/mnt of the target app and the injected code
+#    (in zygote) calls setns(fd, CLONE_NEWNS) to switch mount namespaces
+#    (zygiskd/src/mount.rs, loader setns). This needs the daemon to see the
+#    nsfs file of other domains and zygote/app to hand out/consume it.
+# ============================================================================
+allow su nsfs file {open read getattr}
+allow su appdomain nsfs file {open read getattr}
+allow magisk nsfs file {open read getattr}
+allow zygote appdomain nsfs file *          # zygote consuming app mount ns
+allow zygote appdomain fd use
+allow zygote appdomain process {getattr getpgid}
+
+# ============================================================================
+# 6. READ / ACCESS OTHER APPS' DATA (cross-UID functionality)
+#    Lets the daemon / injected code read app storage where modules need it.
+# ============================================================================
+allow su appdomain dir {search read open}
+allow su appdomain file {open read getattr}
+allow magisk appdomain dir {search read open}
+allow magisk appdomain file {open read getattr}
