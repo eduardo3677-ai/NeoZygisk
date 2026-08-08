@@ -65,12 +65,18 @@ type AndroidCreateNamespaceFn = unsafe extern "C" fn(
 /// creates a new shared namespace, and then uses `android_dlopen_ext` to load the
 /// specified library into that namespace. This is crucial for isolating modules.
 pub fn dlopen(path: &str, flags: i32) -> Result<*mut c_void> {
+    // Keep `filename` alive for the whole function: `filename_ptr` is passed to
+    // android_dlopen_ext() at the end and must stay valid & unmodified.
     let filename = CString::new(path)?;
     let filename_ptr = filename.as_ptr();
 
     // The library path for the new namespace should be the directory of the library itself.
-    let mut path_bytes = filename.into_bytes_with_nul();
-    let dir_ptr = unsafe { libc::dirname(path_bytes.as_mut_ptr() as *mut c_char) };
+    // dirname() may modify its input buffer in place *, so give it an independent
+    // copy instead of reusing/consuming `filename` (whose buffer `filename_ptr`
+    // aliases). Otherwise the path would be clobbered before android_dlopen_ext().
+    //   * POSIX says dirname() MAY modify its argument.
+    let mut dir_buf = CString::new(path)?.into_bytes_with_nul();
+    let dir_ptr = unsafe { libc::dirname(dir_buf.as_mut_ptr() as *mut c_char) };
 
     let mut info = AndroidDlextinfo {
         flags: 0,

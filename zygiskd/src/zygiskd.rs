@@ -21,11 +21,10 @@ use std::fs;
 use std::io::Error;
 use std::os::fd::AsRawFd;
 use std::os::fd::{AsFd, OwnedFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::{
+    ffi::CString,
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
-    process::Command,
     sync::{Arc, Mutex, OnceLock},
     thread,
 };
@@ -66,12 +65,23 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
 
     info!("Daemon listening on {}", DAEMON_SOCKET_PATH.get().unwrap());
 
-    // Main event loop: accept and handle incoming connections.
+    // Main event loop: accept connections and handle each on its own thread.
+    // The handler must never run on the accept loop thread: actions such as
+    // CacheMountNamespace block (fork + pipe I/O) and PingHeartbeat read from
+    // the stream; running them inline would stall accept() and take the whole
+    // daemon down (denial of service for all other clients). thread-per-connection
+    // keeps the loop always available (see BUG 6).
     for stream in listener.incoming() {
-        let stream = stream.context("Failed to accept incoming connection")?;
-        let context = Arc::clone(&context);
-        if let Err(e) = handle_connection(stream, context) {
-            warn!("Error handling connection: {}", e);
+        match stream {
+            Ok(stream) => {
+                let context = Arc::clone(&context);
+                thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, context) {
+                        warn!("Error handling connection: {}", e);
+                    }
+                });
+            }
+            Err(e) => warn!("Failed to accept incoming connection: {}", e),
         }
     }
 
@@ -110,18 +120,15 @@ fn handle_connection(mut stream: UnixStream, context: Arc<AppContext>) -> Result
             let value = constants::SYSTEM_SERVER_STARTED;
             utils::unix_datagram_sendto(CONTROLLER_SOCKET.get().unwrap(), &value.to_le_bytes())?;
         }
-        // Heavier actions are spawned into a separate thread.
-        _ => {
-            thread::spawn(move || {
-                if let Err(e) = handle_threaded_action(action, stream, &context) {
-                    warn!(
-                        "Error handling daemon action '{:?}': {:?}\nBacktrace: {}",
-                        action,
-                        e,
-                        e.backtrace()
-                    );
-                }
-            });
+        // Heavier actions are handled here directly: each connection already
+        // runs on its own thread (see accept loop), so no extra spawn is needed
+        // (and spawning another thread here would only add overhead).
+        DaemonSocketAction::GetProcessFlags
+        | DaemonSocketAction::UpdateMountNamespace
+        | DaemonSocketAction::ReadModules
+        | DaemonSocketAction::RequestCompanionSocket
+        | DaemonSocketAction::GetModuleDir => {
+            handle_threaded_action(action, stream, context.as_ref())?;
         }
     }
     Ok(())
@@ -302,6 +309,22 @@ fn spawn_companion(name: &str, lib_fd: RawFd) -> Result<Option<UnixStream>> {
     let self_exe = std::env::args().next().unwrap();
     let nice_name = self_exe.split('/').last().unwrap_or("zygiskd");
 
+    // Prepare ALL child-side state BEFORE fork(). After fork() in a multithreaded
+    // daemon, the child must only touch async-signal-safe functions: doing any
+    // allocation/formatting here (format!, Command::new, Vec building) could
+    // deadlock on a malloc lock held by another thread, or inherit a corrupted
+    // heap. Buffers are pre-built so execvp() below needs no allocation.
+    let c_self_exe = CString::new(self_exe.as_str())?;
+    let c_arg0 = CString::new(format!("{}-{}", nice_name, name))?;
+    let c_companion = CString::new("companion")?;
+    let c_fd_str = CString::new(companion_sock.as_raw_fd().to_string())?;
+    let argv = [
+        c_arg0.as_ptr(),
+        c_companion.as_ptr(),
+        c_fd_str.as_ptr(),
+        std::ptr::null(),
+    ];
+
     // The fork/exec logic is now handled directly here.
     // # Safety
     // This is highly unsafe because it uses `fork()` and `exec()`. The child
@@ -318,23 +341,20 @@ fn spawn_companion(name: &str, lib_fd: RawFd) -> Result<Option<UnixStream>> {
             drop(daemon_sock); // Child doesn't need the daemon's end of the socket.
 
             // The companion socket FD must be passed to the new process,
-            // so we must remove the `FD_CLOEXEC` flag.
-            fcntl_setfd(companion_sock.as_fd(), FdFlags::empty())
-                .expect("Failed to clear CLOEXEC on companion socket");
-
-            // The first argument (`arg0`) is used to set a descriptive process name.
-            let arg0 = format!("{}-{}", nice_name, name);
-            let companion_fd_str = format!("{}", companion_sock.as_raw_fd());
+            // so we must remove the `FD_CLOEXEC` flag. On failure, exit cleanly
+            // instead of panicking (a panic/abort would leave the parent hanging
+            // on a dead connection).
+            if let Err(e) = fcntl_setfd(companion_sock.as_fd(), FdFlags::empty()) {
+                error!("Failed to clear CLOEXEC on companion socket: {e}");
+                libc::_exit(1);
+            }
 
             // exec replaces the current process; it does not return on success.
-            let err = Command::new(&self_exe)
-                .arg0(arg0)
-                .arg("companion")
-                .arg(companion_fd_str)
-                .exec();
-
+            // argv[0] (`c_arg0`) is the descriptive process name. No allocation
+            // is performed here: all buffers were prepared before fork().
+            libc::execvp(c_self_exe.as_ptr(), argv.as_ptr());
             // If exec returns, it's always an error.
-            bail!("exec failed: {}", err);
+            libc::_exit(1);
         }
 
         // --- Parent Process ---
@@ -418,6 +438,14 @@ fn handle_request_companion_socket(stream: &mut UnixStream, context: &AppContext
             return Ok(());
         }
     };
+    // IMPORTANT (concurrency invariant): this mutex MUST stay held for the whole
+    // handler, including the spawn AND the final sock.send_fd(stream). The daemon
+    // is multithreaded (one thread per connection), and all clients of the same
+    // module share this single control socket to the companion process. Holding
+    // the lock serializes the send_fd calls, so each client's FD is delivered to
+    // the companion in order and the companion's per-request ACK goes to the right
+    // client. If the lock were ever dropped before send_fd, FDs could be crossed
+    // between apps (the BUG 3 race). Do NOT release it early.
     let mut companion = module.companion.lock().unwrap();
 
     // Check if the existing companion socket is still alive.

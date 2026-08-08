@@ -102,20 +102,39 @@ impl MountNamespaceManager {
             0 => {
                 // --- Child Process ---
                 drop(pipe_reader); // Close the side of the pipe we don't use.
-                switch_mount_namespace(pid).unwrap();
 
-                if namespace_type == MountNamespace::Clean {
-                    // Create a new, private mount namespace for ourselves.
-                    unsafe {
-                        rustix_thread::unshare_unsafe(rustix_thread::UnshareFlags::NEWNS).unwrap();
+                // Bundle the fallible setup into a closure so failures are turned
+                // into a sentinel byte + `_exit()` instead of a panic/abort, which
+                // would leave the parent waiting on a dead child (zombie) that
+                // never got reaped.
+                let setup: Result<()> = (|| -> Result<()> {
+                    switch_mount_namespace(pid)?;
+                    if namespace_type == MountNamespace::Clean {
+                        // Create a new, private mount namespace for ourselves.
+                        unsafe {
+                            rustix_thread::unshare_unsafe(rustix_thread::UnshareFlags::NEWNS)?;
+                        }
+                        // Unmount all root and module mounts.
+                        Self::clean_mount_namespace()?;
                     }
-                    // Unmount all root and module mounts.
-                    Self::clean_mount_namespace().unwrap();
-                }
+                    Ok(())
+                })();
 
-                // Signal to the parent that setup is complete.
-                let sig: [u8; 1] = [0];
-                rustix::io::write(pipe_writer, &sig).unwrap();
+                match setup {
+                    Ok(()) => {
+                        // Signal to the parent that setup is complete.
+                        let sig: [u8; 1] = [0];
+                        let _ = rustix::io::write(pipe_writer, &sig);
+                    }
+                    Err(e) => {
+                        // Signal failure so the parent reaps us and returns an
+                        // error instead of caching a half-setup namespace.
+                        error!("mount namespace setup failed: {:?}", e);
+                        let sig: [u8; 1] = [1];
+                        let _ = rustix::io::write(pipe_writer, &sig);
+                        unsafe { libc::_exit(1) };
+                    }
+                }
 
                 // Wait indefinitely. The parent will kill us after it has the FD.
                 loop {
@@ -126,19 +145,25 @@ impl MountNamespaceManager {
                 // --- Parent Process ---
                 drop(pipe_writer);
 
-                // Wait for the signal from the child.
+                // Wait for the signal from the child. EOF (0 bytes) means the
+                // child died without signalling, which is also a failure.
                 let mut buf: [u8; 1] = [0];
-                rustix::io::read(pipe_reader, &mut buf)?;
-                trace!("Child {} finished setting up mount namespace.", child_pid);
-
-                let ns_path = format!("/proc/{}/ns/mnt", child_pid);
-                let ns_file = fs::File::open(&ns_path)?;
+                let setup_ok = matches!(rustix::io::read(pipe_reader, &mut buf), Ok(n) if n == 1 && buf[0] == 0);
 
                 // We have the FD, we can now terminate the child process.
+                // Always reap the child so it never lingers as a zombie.
                 unsafe {
                     libc::kill(child_pid, libc::SIGKILL);
                     libc::waitpid(child_pid, std::ptr::null_mut(), 0);
                 }
+
+                if !setup_ok {
+                    bail!("mount namespace setup failed for pid {}", pid);
+                }
+
+                trace!("Child {} finished setting up mount namespace.", child_pid);
+                let ns_path = format!("/proc/{}/ns/mnt", child_pid);
+                let ns_file = fs::File::open(&ns_path)?;
 
                 let raw_fd = ns_file.as_raw_fd();
                 ns_fd_cell
